@@ -12,6 +12,18 @@
 #include <minimiser_model.hpp>
 #include <shared.hpp>
 
+using count_size_type = uint8_t;
+inline constexpr bool use_simd = true;
+
+template <typename ibf_t>
+constexpr auto counting_agent(ibf_t && ibf) noexcept
+{
+    if constexpr (use_simd)
+        return ibf.template simd_counting_agent<count_size_type>();
+    else
+        return ibf.template counting_agent<count_size_type>();
+}
+
 class sync_out
 {
 public:
@@ -127,12 +139,13 @@ void run_program_multiple(search_arguments const & arguments)
         auto end = std::chrono::high_resolution_clock::now();
         reads_io_time += std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
 
-        std::vector<seqan3::counting_vector<uint16_t>> counts(records.size(),
-                                                              seqan3::counting_vector<uint16_t>(ibf.bin_count(), 0));
+        std::vector<seqan3::counting_vector<count_size_type, use_simd>> counts(records.size(),
+                                                                               seqan3::counting_vector<count_size_type, use_simd>(ibf.bin_count(), 0));
 
         auto count_task = [&](size_t const start, size_t const end)
         {
-            auto counter = ibf.template counting_agent<uint16_t>();
+            auto counter = counting_agent(ibf);
+
             size_t counter_id = start;
 
             auto hash_view = seqan3::views::minimiser_hash(seqan3::ungapped{arguments.kmer_size},
@@ -161,7 +174,7 @@ void run_program_multiple(search_arguments const & arguments)
 
         auto output_task = [&](size_t const start, size_t const end)
         {
-            auto counter = ibf.template counting_agent<uint16_t>();
+            auto counter = counting_agent(ibf);
             size_t counter_id = start;
             std::string result_string{};
             std::vector<uint64_t> minimiser;
@@ -264,7 +277,7 @@ void run_program_single(search_arguments const & arguments)
 
     auto worker = [&] (size_t const start, size_t const end)
     {
-        auto counter = ibf.template counting_agent<uint16_t>();
+        auto counter = counting_agent(ibf);
         std::string result_string{};
         std::vector<uint64_t> minimiser;
 
