@@ -5,6 +5,7 @@
 #include <seqan3/io/sequence_file/input.hpp>
 #include <seqan3/range/views/async_input_buffer.hpp>
 #include <seqan3/range/views/chunk.hpp>
+#include <seqan3/range/views/get.hpp>
 #include <seqan3/range/views/minimiser_hash.hpp>
 #include <seqan3/range/views/zip.hpp>
 #include <seqan3/search/dream_index/interleaved_bloom_filter.hpp>
@@ -277,46 +278,69 @@ void run_program_single(search_arguments const & arguments)
 
     auto worker = [&] (size_t const start, size_t const end)
     {
+        using hash_t = uint64_t;
+        using hash_vector_t = std::vector<hash_t, seqan3::aligned_allocator<hash_t, 64>>;
         auto counter = counting_agent(ibf);
         std::string result_string{};
-        std::vector<uint64_t> minimiser;
+        std::vector<hash_vector_t> minimiser_per_record{};
+        std::vector<std::string> id_per_read{};
+        minimiser_per_record.reserve(end - start);
+        id_per_read.reserve(end - start);
 
         auto hash_view = seqan3::views::minimiser_hash(seqan3::ungapped{arguments.kmer_size},
                                                        seqan3::window_size{arguments.window_size},
                                                        seqan3::seed{adjust_seed(arguments.kmer_size)});
 
-        for (auto && [id, seq] : records | seqan3::views::slice(start, end))
+        size_t chunk_size = 1000;
+        for (size_t chunk = start; chunk < end; chunk += chunk_size)
         {
-            minimiser.clear();
-            result_string.clear();
-            result_string += id;
-            result_string += '\t';
+            minimiser_per_record.clear();
+            id_per_read.clear();
 
-            minimiser = seq | hash_view | seqan3::views::to<std::vector<uint64_t>>;
-            auto & result = counter.bulk_count(minimiser);
-            size_t const minimiser_count{minimiser.size()};
-            size_t current_bin{0};
-
-            size_t const threshold = arguments.treshold_was_set ?
-                                         static_cast<size_t>(minimiser_count * arguments.threshold) :
-                                         kmers_per_window == 1 ? kmer_lemma :
-                                         precomp_thresholds[std::min(minimiser_count < min_number_of_minimisers ?
-                                                                         0 :
-                                                                         minimiser_count - min_number_of_minimisers,
-                                                                     max_number_of_minimisers -
-                                                                         min_number_of_minimisers)] + 2;
-
-            for (auto && count : result)
+            // Step 1 compute the minimiser.
+            std::ranges::for_each(records | seqan3::views::slice(chunk, std::min(chunk + chunk_size, end)),
+            [&] (auto && id_seq_pair)
             {
-                if (count >= threshold)
+                auto && [id, seq] = id_seq_pair;
+                minimiser_per_record.push_back(seq | hash_view | seqan3::views::to<hash_vector_t>);
+                id_per_read.push_back(std::move(id));
+            });
+
+            // Step 2 compute the counts for hash collections.
+            auto const & counting_results = counter.bulk_bulk_count(minimiser_per_record);
+
+            // Step 3 write results.
+            for (size_t read_id = 0; read_id < minimiser_per_record.size(); ++read_id)
+            {
+                result_string.clear();
+                result_string += id_per_read[read_id];
+                result_string += '\t';
+
+                // auto & result = counter.bulk_count(minimiser_per_record[read_id]);
+                size_t const minimiser_count{minimiser_per_record[read_id].size()};
+                size_t current_bin{0};
+
+                size_t const threshold = arguments.treshold_was_set ?
+                                            static_cast<size_t>(minimiser_count * arguments.threshold) :
+                                            kmers_per_window == 1 ? kmer_lemma :
+                                            precomp_thresholds[std::min(minimiser_count < min_number_of_minimisers ?
+                                                                            0 :
+                                                                            minimiser_count - min_number_of_minimisers,
+                                                                        max_number_of_minimisers -
+                                                                            min_number_of_minimisers)] + 2;
+
+                for (auto && count : counting_results[read_id])
                 {
-                    result_string += std::to_string(current_bin);
-                    result_string += ',';
+                    if (count >= threshold)
+                    {
+                        result_string += std::to_string(current_bin);
+                        result_string += ',';
+                    }
+                    ++current_bin;
                 }
-                ++current_bin;
+                result_string += '\n';
+                synced_out.write(result_string);
             }
-            result_string += '\n';
-            synced_out.write(result_string);
         }
     };
 
@@ -343,7 +367,7 @@ void run_program_single(search_arguments const & arguments)
                     << std::setprecision(2)
                     << ibf_io_time << '\t'
                     << reads_io_time << '\t'
-                    << compute_time;
+                    << compute_time << '\n';
     }
 }
 
